@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.build/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# SQLite databases and backups (keep data out of git)
+*.db
+db
+*.sqlite
+*.sqlite3
+*-wal
+*-shm
+*.bak
+*.backup
+
+# Project-specific DB locations
+API/users/*.db*
+API/users/*-wal
+API/users/*-shm
+API/logins/*.db*
+API/logins/*-wal
+API/logins/*-shm
+
+# Users DB files
+API/users/UserData.db
+API/users/UserData.db-wal
+API/users/UserData.db-shm
+API/users/*.bak*
+
+# Env and secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.cert
+*.crt
+gen-lang-client-*.json
+
+# Logs and runtime
+*.log
+logs/
+*.pid
+
+# Editor/OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

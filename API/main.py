@@ -85,9 +85,6 @@ except Exception as e:
 users_conn = sqlite3.connect(USERS_DB_PATH, check_same_thread=False)
 users_conn.row_factory = sqlite3.Row
 
-events_conn = sqlite3.connect(LOGINS_DB_PATH, check_same_thread=False)
-events_conn.row_factory = sqlite3.Row
-
 def init_users_db():
     try:
         with users_conn:
@@ -110,9 +107,14 @@ def init_users_db():
         logger.error(f"Failed to initialize users SQLite DB: {e}")
 
 def init_logins_db():
+    """
+    Ensure the login_events table exists in the users database, and migrate any
+    legacy events from the separate logins.db if present.
+    """
     try:
-        with events_conn:
-            events_conn.execute(
+        # Create login_events table inside users database
+        with users_conn:
+            users_conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS login_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,9 +127,43 @@ def init_logins_db():
                 )
                 """
             )
-        logger.info(f"Login events SQLite initialized at {LOGINS_DB_PATH}")
+        logger.info("login_events table ensured in users DB")
+
+        # Migrate legacy events from separate logins DB if exists and has data
+        if os.path.exists(LOGINS_DB_PATH):
+            try:
+                legacy_conn = sqlite3.connect(LOGINS_DB_PATH)
+                legacy_conn.row_factory = sqlite3.Row
+                cur = legacy_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='login_events'"
+                )
+                has_table = cur.fetchone() is not None
+                if has_table:
+                    rows = legacy_conn.execute(
+                        "SELECT user_id, user_email, login_at, success, ip_address, user_agent FROM login_events"
+                    ).fetchall()
+                    if rows:
+                        with users_conn:
+                            users_conn.executemany(
+                                """
+                                INSERT INTO login_events (user_id, user_email, login_at, success, ip_address, user_agent)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                                """,
+                                [(
+                                    r.get("user_id"),
+                                    r.get("user_email"),
+                                    r.get("login_at"),
+                                    r.get("success"),
+                                    r.get("ip_address"),
+                                    r.get("user_agent"),
+                                ) for r in rows],
+                            )
+                        logger.info(f"Migrated {len(rows)} legacy login events from {LOGINS_DB_PATH} into users DB")
+                legacy_conn.close()
+            except Exception as mig_e:
+                logger.warning(f"Login events legacy migration skipped due to error: {mig_e}")
     except Exception as e:
-        logger.error(f"Failed to initialize login events SQLite DB: {e}")
+        logger.error(f"Failed to initialize login events in users DB: {e}")
 
 def init_contact_forms_db():
     try:
@@ -185,8 +221,8 @@ def update_user_password(email: str, new_password_hash: str):
 
 # ---------- Login event logging ----------
 def log_login_event(user_id: Optional[int], user_email: str, success: bool, ip_address: Optional[str], user_agent: Optional[str]):
-    with events_conn:
-        events_conn.execute(
+    with users_conn:
+        users_conn.execute(
             """
             INSERT INTO login_events (user_id, user_email, login_at, success, ip_address, user_agent)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -292,7 +328,7 @@ def send_admin_notification_email(subject: str, content_text: str):
         import sendgrid
         from sendgrid.helpers.mail import Mail, Email, To, Content
 
-        admin_email = "jack.smith@bodycheck.ai"  # Replace with your admin email
+        admin_email = "support@bodycheck.ai"  # Replace with your admin email
         from_email = Email(SENDGRID_FROM_EMAIL or admin_email)
         to_email = To(admin_email)
         content = Content("text/plain", content_text)
@@ -382,9 +418,9 @@ def _list_login_events(limit: Optional[int] = None):
         "FROM login_events ORDER BY datetime(login_at) DESC"
     )
     if limit is not None:
-        cur = events_conn.execute(query + " LIMIT ?", (int(limit),))
+        cur = users_conn.execute(query + " LIMIT ?", (int(limit),))
     else:
-        cur = events_conn.execute(query)
+        cur = users_conn.execute(query)
     rows = [dict(r) for r in cur.fetchall()]
     for r in rows:
         r["success"] = bool(r.get("success"))
@@ -689,7 +725,7 @@ async def health_check():
     try:
         # Simple DB queries to confirm connectivity
         users_count = users_conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        events_count = events_conn.execute("SELECT COUNT(*) FROM login_events").fetchone()[0]
+        events_count = users_conn.execute("SELECT COUNT(*) FROM login_events").fetchone()[0]
         return {
             "status": "healthy",
             "users_db_path": USERS_DB_PATH,
