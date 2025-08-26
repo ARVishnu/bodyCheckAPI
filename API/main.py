@@ -411,36 +411,33 @@ def _get_admin_emails():
 def _require_admin_from_headers(request: Request):
     admin_email = request.headers.get("X-Admin-Email")
     admin_password = request.headers.get("X-Admin-Password")
-    # hardcoded admin for testing
-    hardcoded_admins = {
-        "vishnu.enest@gmail.com": "123",
-        "support@bodycheck.ai": "123",
-    }
-    if admin_email in hardcoded_admins and admin_password == hardcoded_admins[admin_email]:
-        # Ensure presence in admins DB for persistence
-        email_lc = (admin_email or "").strip().lower()
-        existing = get_admin_by_email(email_lc)
-        if not existing:
-            try:
-                create_admin("Admin", email_lc, bcrypt.hash(admin_password), status="active")
-            except sqlite3.IntegrityError:
-                pass
-        return {"email": email_lc, "status": "active"}
     if not admin_email or not admin_password:
         raise HTTPException(status_code=401, detail="Missing admin credentials")
     admin_email_lc = admin_email.strip().lower()
     allowed = _get_admin_emails()
     if allowed and admin_email_lc not in allowed:
         raise HTTPException(status_code=403, detail="Not an admin account")
+    # Prefer DB if exists
     admin = get_admin_by_email(admin_email_lc)
-    if not admin:
-        raise HTTPException(status_code=401, detail="Invalid admin credentials")
-    if admin.get("status") != "active":
-        raise HTTPException(status_code=403, detail="Admin account not active")
-    stored_pw = admin.get("password_hash") or ""
-    if not bcrypt.verify(admin_password, stored_pw):
-        raise HTTPException(status_code=401, detail="Invalid admin credentials")
-    return admin
+    if admin:
+        if admin.get("status") != "active":
+            raise HTTPException(status_code=403, detail="Admin account not active")
+        stored_pw = admin.get("password_hash") or ""
+        if not bcrypt.verify(admin_password, stored_pw):
+            raise HTTPException(status_code=401, detail="Invalid admin credentials")
+        return admin
+    # Bootstrap hardcoded only if no DB record exists yet
+    hardcoded_admins = {
+        "vishnu.enest@gmail.com": "123",
+        "support@bodycheck.ai": "123",
+    }
+    if admin_email_lc in hardcoded_admins and admin_password == hardcoded_admins[admin_email_lc]:
+        try:
+            create_admin("Admin", admin_email_lc, bcrypt.hash(admin_password), status="active")
+        except sqlite3.IntegrityError:
+            pass
+        return {"email": admin_email_lc, "status": "active"}
+    raise HTTPException(status_code=401, detail="Invalid admin credentials")
 
 def _list_users(limit: Optional[int] = None):
     query = "SELECT id, full_name, email, created_at, status FROM users ORDER BY datetime(created_at) DESC"
