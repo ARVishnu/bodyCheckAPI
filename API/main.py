@@ -54,12 +54,12 @@ Table: users
 
 DATA_ROOT = os.environ.get("BODYCHECK_DATA_ROOT") or os.path.dirname(__file__)
 
-# Ensure separate folders for users and logins
+# Ensure separate folders for users and admins
 USERS_DB_PATH = os.environ.get("USERS_DB_PATH") or os.path.join(DATA_ROOT, "users", "UserData.db")
-LOGINS_DB_PATH = os.environ.get("LOGINS_DB_PATH") or os.path.join(DATA_ROOT, "logins", "logins.db")
+ADMIN_DB_PATH = os.environ.get("ADMIN_DB_PATH") or os.path.join(DATA_ROOT, "admins", "AdminData.db")
 
 os.makedirs(os.path.dirname(USERS_DB_PATH), exist_ok=True)
-os.makedirs(os.path.dirname(LOGINS_DB_PATH), exist_ok=True)
+os.makedirs(os.path.dirname(ADMIN_DB_PATH), exist_ok=True)
 
 # Migrate legacy DBs in API root if present and targets don't exist
 try:
@@ -70,20 +70,12 @@ try:
 except Exception as e:
     logger.warning(f"Users DB migration skipped: {e}")
 
-try:
-    legacy_logins_candidates = [
-        os.path.join(os.path.dirname(__file__), "logins.ds"),
-        os.path.join(os.path.dirname(__file__), "logins.db"),
-    ]
-    legacy_logins = next((p for p in legacy_logins_candidates if os.path.exists(p)), None)
-    if not os.path.exists(LOGINS_DB_PATH) and legacy_logins:
-        shutil.copy2(legacy_logins, LOGINS_DB_PATH)
-        logger.info(f"Migrated legacy login events DB from {legacy_logins} -> {LOGINS_DB_PATH}")
-except Exception as e:
-    logger.warning(f"Login events DB migration skipped: {e}")
+pass
 
 users_conn = sqlite3.connect(USERS_DB_PATH, check_same_thread=False)
 users_conn.row_factory = sqlite3.Row
+admins_conn = sqlite3.connect(ADMIN_DB_PATH, check_same_thread=False)
+admins_conn.row_factory = sqlite3.Row
 
 def init_users_db():
     try:
@@ -106,13 +98,32 @@ def init_users_db():
     except Exception as e:
         logger.error(f"Failed to initialize users SQLite DB: {e}")
 
+def init_admins_db():
+    try:
+        with admins_conn:
+            admins_conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS admins (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    full_name TEXT,
+                    email TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    otp_code TEXT,
+                    otp_expiry TEXT
+                )
+                """
+            )
+        logger.info(f"Admins SQLite initialized at {ADMIN_DB_PATH}")
+    except Exception as e:
+        logger.error(f"Failed to initialize admins SQLite DB: {e}")
+
 def init_logins_db():
     """
-    Ensure the login_events table exists in the users database, and migrate any
-    legacy events from the separate logins.db if present.
+    Ensure the login_events table exists in the users database.
     """
     try:
-        # Create login_events table inside users database
         with users_conn:
             users_conn.execute(
                 """
@@ -128,40 +139,6 @@ def init_logins_db():
                 """
             )
         logger.info("login_events table ensured in users DB")
-
-        # Migrate legacy events from separate logins DB if exists and has data
-        if os.path.exists(LOGINS_DB_PATH):
-            try:
-                legacy_conn = sqlite3.connect(LOGINS_DB_PATH)
-                legacy_conn.row_factory = sqlite3.Row
-                cur = legacy_conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='login_events'"
-                )
-                has_table = cur.fetchone() is not None
-                if has_table:
-                    rows = legacy_conn.execute(
-                        "SELECT user_id, user_email, login_at, success, ip_address, user_agent FROM login_events"
-                    ).fetchall()
-                    if rows:
-                        with users_conn:
-                            users_conn.executemany(
-                                """
-                                INSERT INTO login_events (user_id, user_email, login_at, success, ip_address, user_agent)
-                                VALUES (?, ?, ?, ?, ?, ?)
-                                """,
-                                [(
-                                    r.get("user_id"),
-                                    r.get("user_email"),
-                                    r.get("login_at"),
-                                    r.get("success"),
-                                    r.get("ip_address"),
-                                    r.get("user_agent"),
-                                ) for r in rows],
-                            )
-                        logger.info(f"Migrated {len(rows)} legacy login events from {LOGINS_DB_PATH} into users DB")
-                legacy_conn.close()
-            except Exception as mig_e:
-                logger.warning(f"Login events legacy migration skipped due to error: {mig_e}")
     except Exception as e:
         logger.error(f"Failed to initialize login events in users DB: {e}")
 
@@ -191,6 +168,38 @@ def get_user_by_email(email: str):
     cur = users_conn.execute("SELECT * FROM users WHERE email = ?", (email,))
     row = cur.fetchone()
     return dict(row) if row else None
+
+def get_admin_by_email(email: str):
+    cur = admins_conn.execute("SELECT * FROM admins WHERE email = ?", (email,))
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+def create_admin(full_name: str, email: str, password_hash: str, status: str = "active"):
+    created_at = datetime.utcnow().isoformat()
+    with admins_conn:
+        admins_conn.execute(
+            """
+            INSERT INTO admins (full_name, email, password_hash, created_at, status)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (full_name, email, password_hash, created_at, status),
+        )
+
+def set_admin_status(email: str, status: str):
+    with admins_conn:
+        admins_conn.execute("UPDATE admins SET status = ? WHERE email = ?", (status, email))
+
+def set_admin_otp(email: str, otp_code: str, otp_expiry: str):
+    with admins_conn:
+        admins_conn.execute("UPDATE admins SET otp_code = ?, otp_expiry = ? WHERE email = ?", (otp_code, otp_expiry, email))
+
+def clear_admin_otp(email: str):
+    with admins_conn:
+        admins_conn.execute("UPDATE admins SET otp_code = NULL, otp_expiry = NULL WHERE email = ?", (email,))
+
+def update_admin_password(email: str, new_password_hash: str):
+    with admins_conn:
+        admins_conn.execute("UPDATE admins SET password_hash = ? WHERE email = ?", (new_password_hash, email))
 
 def create_user_pending(full_name: str, email: str, password_hash: str, otp_code: str, otp_expiry: str):
     created_at = datetime.utcnow().isoformat()
@@ -241,6 +250,7 @@ def log_login_event(user_id: Optional[int], user_email: str, success: bool, ip_a
 init_users_db()
 init_logins_db()
 init_contact_forms_db()
+init_admins_db()
 
 # ---------- Email (SendGrid) utility ----------
 try:
@@ -377,6 +387,22 @@ class ContactFormData(BaseModel):
     message: str
     subject: Optional[str] = None
 
+class AdminChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+class AdminResetUserPasswordRequest(BaseModel):
+    target_email: str
+    new_password: str
+
+class AdminForgotPasswordRequest(BaseModel):
+    email: str
+
+class AdminResetPasswordWithOtpRequest(BaseModel):
+    email: str
+    otp: str
+    new_password: str
+
 # ---------- Admin utilities and endpoints ----------
 def _get_admin_emails():
     raw = os.environ.get("ADMIN_EMAILS", "")
@@ -386,23 +412,35 @@ def _require_admin_from_headers(request: Request):
     admin_email = request.headers.get("X-Admin-Email")
     admin_password = request.headers.get("X-Admin-Password")
     # hardcoded admin for testing
-    if admin_email == "vishnu@example.com" and admin_password == "123":
-        return {"email": admin_email, "status": "active"}
+    hardcoded_admins = {
+        "vishnu.enest@gmail.com": "123",
+        "support@bodycheck.ai": "123",
+    }
+    if admin_email in hardcoded_admins and admin_password == hardcoded_admins[admin_email]:
+        # Ensure presence in admins DB for persistence
+        email_lc = (admin_email or "").strip().lower()
+        existing = get_admin_by_email(email_lc)
+        if not existing:
+            try:
+                create_admin("Admin", email_lc, bcrypt.hash(admin_password), status="active")
+            except sqlite3.IntegrityError:
+                pass
+        return {"email": email_lc, "status": "active"}
     if not admin_email or not admin_password:
         raise HTTPException(status_code=401, detail="Missing admin credentials")
     admin_email_lc = admin_email.strip().lower()
     allowed = _get_admin_emails()
     if allowed and admin_email_lc not in allowed:
         raise HTTPException(status_code=403, detail="Not an admin account")
-    user = get_user_by_email(admin_email_lc)
-    if not user:
+    admin = get_admin_by_email(admin_email_lc)
+    if not admin:
         raise HTTPException(status_code=401, detail="Invalid admin credentials")
-    if user.get("status") != "active":
+    if admin.get("status") != "active":
         raise HTTPException(status_code=403, detail="Admin account not active")
-    stored_pw = user.get("password_hash") or ""
+    stored_pw = admin.get("password_hash") or ""
     if not bcrypt.verify(admin_password, stored_pw):
         raise HTTPException(status_code=401, detail="Invalid admin credentials")
-    return user
+    return admin
 
 def _list_users(limit: Optional[int] = None):
     query = "SELECT id, full_name, email, created_at, status FROM users ORDER BY datetime(created_at) DESC"
@@ -457,6 +495,123 @@ async def admin_contact_forms(request: Request, limit: Optional[int] = None):
     _require_admin_from_headers(request)
     rows = _list_contact_forms(limit)
     return {"contact_forms": rows}
+
+# ---------- Admin password management ----------
+
+@app.post("/admin/change-password")
+async def admin_change_password(req: Request, body: AdminChangePasswordRequest):
+    """
+    Allow an authenticated admin to change their own password.
+    - If authenticated via hardcoded credentials, we allow change if old_password matches header password.
+    - Persist the admin in the users DB if not already present.
+    """
+    admin_user = _require_admin_from_headers(req)
+    admin_email = (admin_user.get("email") or "").strip().lower()
+
+    # Find or create admin in admins DB
+    db_admin = get_admin_by_email(admin_email)
+
+    # Verify old password
+    header_pw = req.headers.get("X-Admin-Password") or ""
+    if db_admin and db_admin.get("password_hash"):
+        if not bcrypt.verify(body.old_password, db_admin.get("password_hash")):
+            raise HTTPException(status_code=401, detail="Invalid old password")
+    else:
+        # No DB user or no password hash (hardcoded admin path)
+        if body.old_password != header_pw:
+            raise HTTPException(status_code=401, detail="Invalid old password")
+
+    # Update or create
+    new_hash = bcrypt.hash(body.new_password)
+    if db_admin:
+        update_admin_password(admin_email, new_hash)
+        set_admin_status(admin_email, "active")
+        clear_admin_otp(admin_email)
+    else:
+        # Create an active admin record
+        create_admin("Admin", admin_email, new_hash, status="active")
+    return {"message": "Password changed successfully"}
+
+@app.post("/admin/reset-user-password")
+async def admin_reset_user_password(req: Request, body: AdminResetUserPasswordRequest):
+    """
+    Admin resets a user's password directly (no OTP). Requires admin auth.
+    """
+    _require_admin_from_headers(req)
+    target_email = body.target_email.strip().lower()
+    user = get_user_by_email(target_email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    new_hash = bcrypt.hash(body.new_password)
+    update_user_password(target_email, new_hash)
+    clear_user_otp(target_email)
+    set_user_status(target_email, "active")
+    return {"message": "User password reset successfully"}
+
+@app.post("/admin/forgot-password")
+async def admin_forgot_password(body: AdminForgotPasswordRequest):
+    """
+    Admin forgot password (only for allowed admin emails). Generates and emails an OTP.
+    """
+    admin_email = body.email.strip().lower()
+    allowed = {"vishnu@example.com", "support@bodycheck.ai"}
+    if admin_email not in allowed:
+        raise HTTPException(status_code=403, detail="Not an admin account")
+
+    admin = get_admin_by_email(admin_email)
+    # generate otp and store on admin row; create if missing
+    otp_code = f"{secrets.randbelow(10**6):06d}"
+    expiry = (datetime.utcnow() + timedelta(minutes=OTP_TTL_MINUTES)).isoformat()
+    if admin:
+        set_admin_otp(admin_email, otp_code, expiry)
+    else:
+        # create an admin so we can store OTP
+        password_hash = bcrypt.hash("123")
+        create_admin("Admin", admin_email, password_hash, status="active")
+        set_admin_otp(admin_email, otp_code, expiry)
+    sent, err = send_otp_email(admin_email, otp_code)
+    if not sent:
+        logger.error(f"Admin forgot-password email failed: {err}")
+    return {"message": "If that admin exists, an OTP has been sent"}
+
+@app.post("/admin/reset-password")
+async def admin_reset_password(body: AdminResetPasswordWithOtpRequest):
+    """
+    Reset admin password using OTP emailed via /admin/forgot-password.
+    """
+    admin_email = body.email.strip().lower()
+    allowed = {"vishnu@example.com", "support@bodycheck.ai"}
+    if admin_email not in allowed:
+        raise HTTPException(status_code=403, detail="Not an admin account")
+    admin = get_admin_by_email(admin_email)
+    if not admin:
+        raise HTTPException(status_code=404, detail="Admin not found")
+    otp_stored = admin.get("otp_code", "")
+    otp_expiry = admin.get("otp_expiry", "")
+    if not otp_stored:
+        raise HTTPException(status_code=400, detail="No OTP requested for this account")
+    try:
+        if otp_expiry:
+            try:
+                expiry_dt = datetime.fromisoformat(otp_expiry)
+            except ValueError:
+                try:
+                    expiry_dt = datetime.strptime(otp_expiry, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    expiry_dt = datetime.strptime(otp_expiry.split('.')[0], "%Y-%m-%dT%H:%M:%S")
+        else:
+            raise HTTPException(status_code=400, detail="OTP expired")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid OTP expiry format on server")
+    if datetime.utcnow() > expiry_dt:
+        raise HTTPException(status_code=400, detail="OTP expired")
+    if str(otp_stored).strip() != str(body.otp).strip():
+        raise HTTPException(status_code=401, detail="Invalid OTP")
+    new_hash = bcrypt.hash(body.new_password)
+    update_admin_password(admin_email, new_hash)
+    clear_admin_otp(admin_email)
+    set_admin_status(admin_email, "active")
+    return {"message": "Admin password reset successful"}
 
 # ---------- Signup with OTP verification ----------
 @app.post("/signup")
@@ -729,7 +884,6 @@ async def health_check():
         return {
             "status": "healthy",
             "users_db_path": USERS_DB_PATH,
-            "logins_db_path": LOGINS_DB_PATH,
             "user_count": users_count,
             "login_events_count": events_count,
         }
