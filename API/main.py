@@ -1,5 +1,4 @@
 import os
-import json
 import logging
 import secrets
 from datetime import datetime, timedelta
@@ -13,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from passlib.hash import bcrypt
 from dotenv import load_dotenv, find_dotenv
+
 
 # ---------- logging ----------
 logging.basicConfig(level=logging.INFO)
@@ -417,7 +417,6 @@ def _require_admin_from_headers(request: Request):
     allowed = _get_admin_emails()
     if allowed and admin_email_lc not in allowed:
         raise HTTPException(status_code=403, detail="Not an admin account")
-    # Prefer DB if exists
     admin = get_admin_by_email(admin_email_lc)
     if admin:
         if admin.get("status") != "active":
@@ -426,7 +425,7 @@ def _require_admin_from_headers(request: Request):
         if not bcrypt.verify(admin_password, stored_pw):
             raise HTTPException(status_code=401, detail="Invalid admin credentials")
         return admin
-    # Bootstrap hardcoded only if no DB record exists yet
+    # Restore hardcoded_admins
     hardcoded_admins = {
         "vishnu.enest@gmail.com": "123",
         "support@bodycheck.ai": "123",
@@ -551,7 +550,7 @@ async def admin_forgot_password(body: AdminForgotPasswordRequest):
     Admin forgot password (only for allowed admin emails). Generates and emails an OTP.
     """
     admin_email = body.email.strip().lower()
-    allowed = {"vishnu@example.com", "support@bodycheck.ai"}
+    allowed = _get_admin_emails()
     if admin_email not in allowed:
         raise HTTPException(status_code=403, detail="Not an admin account")
 
@@ -577,7 +576,7 @@ async def admin_reset_password(body: AdminResetPasswordWithOtpRequest):
     Reset admin password using OTP emailed via /admin/forgot-password.
     """
     admin_email = body.email.strip().lower()
-    allowed = {"vishnu@example.com", "support@bodycheck.ai"}
+    allowed = _get_admin_emails()
     if admin_email not in allowed:
         raise HTTPException(status_code=403, detail="Not an admin account")
     admin = get_admin_by_email(admin_email)
@@ -588,18 +587,9 @@ async def admin_reset_password(body: AdminResetPasswordWithOtpRequest):
     if not otp_stored:
         raise HTTPException(status_code=400, detail="No OTP requested for this account")
     try:
-        if otp_expiry:
-            try:
-                expiry_dt = datetime.fromisoformat(otp_expiry)
-            except ValueError:
-                try:
-                    expiry_dt = datetime.strptime(otp_expiry, "%Y-%m-%d %H:%M:%S")
-                except ValueError:
-                    expiry_dt = datetime.strptime(otp_expiry.split('.')[0], "%Y-%m-%dT%H:%M:%S")
-        else:
-            raise HTTPException(status_code=400, detail="OTP expired")
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid OTP expiry format on server")
+        expiry_dt = datetime.fromisoformat(otp_expiry)
+    except ValueError:
+        expiry_dt = datetime.strptime(otp_expiry.split('.')[0], "%Y-%m-%dT%H:%M:%S")
     if datetime.utcnow() > expiry_dt:
         raise HTTPException(status_code=400, detail="OTP expired")
     if str(otp_stored).strip() != str(body.otp).strip():
